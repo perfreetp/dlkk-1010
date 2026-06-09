@@ -29,12 +29,26 @@ export async function queryFees(params: any) {
   const {
     roomNumber, building, unit, ownerName, overdueLevel,
     minOverdueDays, maxOverdueDays, minAmount, maxAmount,
-    onlyOverdue, page, pageSize
+    onlyOverdue, page, pageSize, status,
   } = params;
 
   const conditions: string[] = [];
   const values: any[] = [];
 
+  if (status) {
+    if (Array.isArray(status)) {
+      conditions.push(`f.status IN (${status.map(() => '?').join(',')})`);
+      values.push(...status);
+    } else {
+      conditions.push('f.status = ?');
+      values.push(status);
+    }
+  }
+  // onlyOverdue=true: 只看已逾期(overdue)；false: 全部状态不过滤
+  if (onlyOverdue) {
+    conditions.push('f.status = ?');
+    values.push('overdue');
+  }
   if (roomNumber) { conditions.push('f.room_number LIKE ?'); values.push(`%${roomNumber}%`); }
   if (building) { conditions.push('r.building = ?'); values.push(building); }
   if (unit) { conditions.push('r.unit = ?'); values.push(unit); }
@@ -49,11 +63,10 @@ export async function queryFees(params: any) {
       values.push(...levels);
     }
   }
-  if (minOverdueDays !== undefined) { conditions.push('f.overdue_days >= ?'); values.push(minOverdueDays); }
-  if (maxOverdueDays !== undefined) { conditions.push('f.overdue_days <= ?'); values.push(maxOverdueDays); }
-  if (minAmount !== undefined) { conditions.push('f.unpaid_amount >= ?'); values.push(minAmount); }
-  if (maxAmount !== undefined) { conditions.push('f.unpaid_amount <= ?'); values.push(maxAmount); }
-  if (onlyOverdue) { conditions.push('f.status = ?'); values.push('overdue'); }
+  if (minOverdueDays !== undefined && minOverdueDays !== null) { conditions.push('f.overdue_days >= ?'); values.push(minOverdueDays); }
+  if (maxOverdueDays !== undefined && maxOverdueDays !== null) { conditions.push('f.overdue_days <= ?'); values.push(maxOverdueDays); }
+  if (minAmount !== undefined && minAmount !== null) { conditions.push('f.unpaid_amount >= ?'); values.push(minAmount); }
+  if (maxAmount !== undefined && maxAmount !== null) { conditions.push('f.unpaid_amount <= ?'); values.push(maxAmount); }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
@@ -149,23 +162,59 @@ export async function searchByRoomNumber(keyword: string, page = 1, pageSize = 5
   );
 
   const offset = (page - 1) * pageSize;
-  const list = await all(`
+  const rooms = await all<any>(`
     SELECT
       r.id, r.room_number, r.building, r.unit, r.floor, r.area,
-      r.owner_name, r.owner_phone, r.status,
-      COALESCE(SUM(CASE WHEN f.status != 'paid' THEN f.unpaid_amount END), 0) as total_unpaid,
-      COALESCE(MAX(CASE WHEN f.status != 'paid' THEN f.overdue_days END), 0) as max_overdue_days,
-      (SELECT COUNT(*) FROM fees f2 WHERE f2.room_id = r.id AND f2.status != 'paid') as unpaid_count
+      r.owner_name, r.owner_phone, r.status
     FROM rooms r
-    LEFT JOIN fees f ON f.room_id = r.id
     WHERE r.room_number LIKE ?
-    GROUP BY r.id
-    ORDER BY total_unpaid DESC
+    ORDER BY r.room_number
     LIMIT ? OFFSET ?
   `, ...values, pageSize, offset);
 
+  const list: any[] = [];
+  for (const r of rooms) {
+    const agg = await get<any>(`
+      SELECT
+        COALESCE(SUM(CASE WHEN f.status != 'paid' THEN f.unpaid_amount END), 0) as total_unpaid,
+        COALESCE(MAX(CASE WHEN f.status != 'paid' THEN f.overdue_days END), 0) as max_overdue_days,
+        (SELECT COUNT(*) FROM fees f2 WHERE f2.room_id = ? AND f2.status != 'paid') as unpaid_count,
+        (SELECT COUNT(*) FROM fees f2 WHERE f2.room_id = ?) as total_count
+      FROM fees f WHERE f.room_id = ?
+    `, r.id, r.id, r.id);
+
+    const levels = await all<any>(`
+      SELECT f.overdue_level, COUNT(*) as cnt, f.overdue_days as od
+      FROM fees f WHERE f.room_id = ? AND f.status != 'paid'
+      GROUP BY f.overdue_level ORDER BY f.overdue_days DESC
+    `, r.id);
+
+    const levelOrder: Record<string, number> = { normal: 0, warning: 1, mild: 2, moderate: 3, severe: 4, critical: 5 };
+    let highestLevel = 'normal';
+    let maxDays = 0;
+    for (const l of levels) {
+      if ((levelOrder[l.overdue_level] ?? -1) > (levelOrder[highestLevel] ?? -1)) {
+        highestLevel = l.overdue_level;
+      }
+      if (l.od > maxDays) maxDays = l.od;
+    }
+
+    list.push({
+      ...r,
+      total_unpaid: agg?.total_unpaid || 0,
+      max_overdue_days: agg?.max_overdue_days || maxDays,
+      highest_level: highestLevel,
+      highest_level_desc: getOverdueLevelDescription(highestLevel),
+      unpaid_count: agg?.unpaid_count || 0,
+      total_fee_count: agg?.total_count || 0,
+      overdue_levels_dist: levels.map((l: any) => ({ level: l.overdue_level, count: l.cnt })),
+    });
+  }
+
+  list.sort((a, b) => b.total_unpaid - a.total_unpaid);
+
   return {
-    list: list.map((row: any) => ({ ...row, highest_level_desc: getOverdueLevelDescription(row.highest_level || 'normal') })),
+    list,
     pagination: paginate(totalRow?.total || 0, page, pageSize),
   };
 }

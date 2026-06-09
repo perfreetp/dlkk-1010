@@ -33,8 +33,9 @@ export async function recalculateFees(feeIds: string[], reason?: string) {
     }
 
     const newOriginal = parseFloat((baseAmount + serviceCharge + lateFee).toFixed(2));
-    const newPayable = parseFloat((newOriginal - fee.reduction_amount).toFixed(2));
-    const newUnpaid = parseFloat((newPayable - fee.paid_amount).toFixed(2));
+    const newPayable = parseFloat(Math.max(0, newOriginal - fee.reduction_amount).toFixed(2));
+    const rawUnpaid = newPayable - fee.paid_amount;
+    const newUnpaid = parseFloat(Math.max(0, rawUnpaid).toFixed(2));
 
     const oldData = {
       original_amount: fee.original_amount,

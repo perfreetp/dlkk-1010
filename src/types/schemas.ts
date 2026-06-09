@@ -1,5 +1,17 @@
 import { z } from 'zod';
 
+function toBoolean(val: unknown): boolean | unknown {
+  if (typeof val === 'boolean') return val;
+  if (typeof val === 'number') return val !== 0;
+  if (typeof val === 'string') {
+    const s = val.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on', 'y'].includes(s)) return true;
+    if (['false', '0', 'no', 'off', 'n', ''].includes(s)) return false;
+  }
+  return val;
+}
+const booleanLike = () => z.preprocess(toBoolean, z.boolean());
+
 export const PaginationSchema = z.object({
   page: z.coerce.number().int().positive().default(1),
   pageSize: z.coerce.number().int().positive().max(500).default(20),
@@ -15,7 +27,8 @@ export const FeeQuerySchema = z.object({
   maxOverdueDays: z.coerce.number().int().optional(),
   minAmount: z.coerce.number().optional(),
   maxAmount: z.coerce.number().optional(),
-  onlyOverdue: z.coerce.boolean().default(false),
+  onlyOverdue: booleanLike().default(false),
+  status: z.union([z.string(), z.array(z.string())]).optional(),
   ...PaginationSchema.shape,
 });
 
@@ -32,9 +45,25 @@ export const CreateTaskSchema = z.object({
   channel: z.enum(['sms', 'phone', 'email', 'wechat', 'letter']),
   priority: z.coerce.number().int().min(1).max(5).default(3),
   scheduledAt: z.string().optional(),
-  batchCreate: z.coerce.boolean().default(false),
+  batchCreate: booleanLike().default(false),
   overdueLevels: z.array(z.string()).optional(),
   minAmount: z.coerce.number().optional(),
+});
+
+export const PreviewTaskSchema = z.object({
+  name: z.string().optional(),
+  stage: z.string().optional(),
+  templateId: z.string().optional(),
+  feeIds: z.array(z.string()).optional().default([]),
+  channel: z.string().optional().default('sms'),
+  priority: z.coerce.number().int().optional(),
+  batchCreate: booleanLike().default(true),
+  overdueLevels: z.array(z.string()).optional(),
+  minAmount: z.coerce.number().optional(),
+  minOverdueDays: z.coerce.number().int().optional(),
+  maxOverdueDays: z.coerce.number().int().optional(),
+  building: z.string().optional(),
+  roomNumber: z.string().optional(),
 });
 
 export const TemplateSelectSchema = z.object({
@@ -100,7 +129,7 @@ export const ComplaintSchema = z.object({
 
 export const ApprovalSchema = z.object({
   reductionId: z.string().min(1),
-  approved: z.boolean(),
+  approved: booleanLike(),
   approver: z.string().min(1),
   approvalNote: z.string().optional(),
 });
@@ -110,6 +139,24 @@ export const StatsQuerySchema = z.object({
   endDate: z.string().optional(),
   building: z.string().optional(),
   dimension: z.enum(['overall', 'stage', 'channel', 'call_result']).default('overall'),
+});
+
+export const ComboStatsSchema = z.object({
+  groupBy: z.enum(['building', 'stage', 'channel', 'building_stage', 'building_channel', 'stage_channel', 'all']).default('all'),
+  building: z.string().optional(),
+  stage: z.union([z.string(), z.array(z.string())]).optional(),
+  channel: z.union([z.string(), z.array(z.string())]).optional(),
+  startDate: z.string().optional(),
+  endDate: z.string().optional(),
+});
+
+export const ClosureBoardSchema = z.object({
+  building: z.string().optional(),
+  stage: z.union([z.string(), z.array(z.string())]).optional(),
+  startDate: z.string().optional(),
+  endDate: z.string().optional(),
+  roomNumber: z.string().optional(),
+  taskId: z.string().optional(),
 });
 
 export const CallResultSchema = z.object({

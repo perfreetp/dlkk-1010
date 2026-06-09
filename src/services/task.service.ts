@@ -2,6 +2,16 @@ import { run, get, all } from '../db/connection';
 import { v4 as uuidv4 } from 'uuid';
 import { getNow, renderTemplate } from '../utils/helpers';
 
+function parseBlockChannels(raw: string): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.map(String);
+  } catch (_) {
+  }
+  return String(raw).split(',').map(s => s.trim().replace(/^[\["\s]+|[\]"\s]+$/g, '')).filter(Boolean);
+}
+
 export async function getTemplates(params: any) {
   const { type, stage, channel } = params;
   const conditions: string[] = ['enabled = 1'];
@@ -76,7 +86,7 @@ export async function createCollectionTask(params: any, operator?: string) {
 
   for (const fee of feeRows) {
     const blacklist = blacklistMap.get(fee.room_number);
-    const blockChannels = blacklist ? (blacklist.block_channels || '').split(',') : [];
+    const blockChannels = blacklist ? parseBlockChannels(blacklist.block_channels) : [];
     const isBlacklisted = blockChannels.includes(channel);
 
     const lastSent = await get<any>(`
@@ -174,4 +184,110 @@ export async function getTaskDetail(taskId: string) {
   }
 
   return { task, queues, stats: { total: queues.length, byStatus, byChannel } };
+}
+
+// 批量催缴任务预演 (preflight)
+export async function previewCollectionTask(params: any) {
+  const { stage, channel, priority, feeIds, batchCreate, overdueLevels, minAmount } = params;
+
+  let finalFeeIds = [...(feeIds || [])];
+  if (batchCreate) {
+    const conditions: string[] = [];
+    const values: any[] = [];
+    if (overdueLevels && overdueLevels.length > 0) {
+      const sts = Array.isArray(overdueLevels) ? overdueLevels : String(overdueLevels).split(',').filter(Boolean);
+      if (sts.length > 0) {
+        conditions.push(`f.overdue_level IN (${sts.map(() => '?').join(',')})`);
+        values.push(...sts);
+      }
+    }
+    if (minAmount !== undefined && minAmount !== null) { conditions.push('f.unpaid_amount >= ?'); values.push(minAmount); }
+    conditions.push("f.status != 'paid'");
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const batchFees = await all<any>(`SELECT f.id FROM fees f ${whereClause}`, ...values);
+    finalFeeIds = [...new Set([...finalFeeIds, ...batchFees.map(f => f.id)])];
+  }
+
+  if (finalFeeIds.length === 0) {
+    return {
+      selected: 0, total_amount: 0,
+      estimated_unpaid: 0, overdue_levels_dist: {},
+      blacklist_intercepted: 0, dup_intercepted: 0, to_be_queued: 0,
+      samples: [], intercept_reasons: [],
+    };
+  }
+
+  const placeholders = finalFeeIds.map(() => '?').join(',');
+  const feeRows = await all<any>(`
+    SELECT f.id as fee_id, f.room_number, f.unpaid_amount, f.overdue_days, f.overdue_level, f.stage, f.period,
+           r.owner_name, r.building, r.owner_phone
+    FROM fees f JOIN rooms r ON f.room_id = r.id
+    WHERE f.id IN (${placeholders})
+  `, ...finalFeeIds);
+
+  const levelsDist: Record<string, { count: number; amount: number }> = {};
+  let totalUnpaid = 0;
+  for (const f of feeRows) {
+    totalUnpaid += f.unpaid_amount;
+    const lvl = f.overdue_level || 'normal';
+    if (!levelsDist[lvl]) levelsDist[lvl] = { count: 0, amount: 0 };
+    levelsDist[lvl].count++;
+    levelsDist[lvl].amount += f.unpaid_amount;
+  }
+
+  const blacklists = await all<any>(`
+    SELECT room_number, block_channels, effective_from, effective_to
+    FROM blacklists WHERE (effective_to IS NULL OR effective_to > datetime('now'))
+  `);
+  const blMap = new Map(blacklists.map(b => [b.room_number, b]));
+
+  let blCount = 0;
+  let dupCount = 0;
+  const interceptReasons: any[] = [];
+
+  const checkPromises = feeRows.map(async (fee) => {
+    const bl = blMap.get(fee.room_number);
+    const blockChannels = bl?.block_channels ? parseBlockChannels(bl.block_channels) : [];
+    if (blockChannels.includes(channel)) {
+      blCount++;
+      interceptReasons.push({ room_number: fee.room_number, reason: 'blacklist', channel_block: channel });
+      return { fee, intercepted: true, reason: 'blacklist' };
+    }
+    return get<any>(`SELECT MAX(created_at) as last_at FROM send_queues WHERE fee_id = ? AND channel = ? AND status != 'intercepted'`,
+      fee.fee_id).then(lastSent => {
+      const minInterval = 24;
+      if (lastSent?.last_at) {
+        const hoursDiff = (Date.now() - new Date(lastSent.last_at).getTime()) / (1000 * 60 * 60);
+        if (hoursDiff < minInterval) {
+          dupCount++;
+          interceptReasons.push({ room_number: fee.room_number, reason: 'duplicate', hours_until_ok: (minInterval - hoursDiff).toFixed(2) });
+          return { fee, intercepted: true, reason: 'duplicate' };
+        }
+      }
+      return { fee, intercepted: false };
+    });
+  });
+
+  const results = await Promise.all(checkPromises);
+  const queuedFees = results.filter(r => !r.intercepted);
+
+  return {
+    selected: finalFeeIds.length,
+    total_fees: feeRows.length,
+    total_amount: parseFloat(totalUnpaid.toFixed(2)),
+    estimated_unpaid: parseFloat(totalUnpaid.toFixed(2)),
+    overdue_levels_dist: levelsDist,
+    blacklist_intercepted: blCount,
+    dup_intercepted: dupCount,
+    to_be_queued: queuedFees.length,
+    to_be_queued_amount: parseFloat(queuedFees.reduce((s, r) => s + r.fee.unpaid_amount, 0).toFixed(2)),
+    queue_estimate_rate: feeRows.length > 0 ? parseFloat(((queuedFees.length / feeRows.length) * 100).toFixed(2)) : 0,
+    samples: queuedFees.slice(0, 5).map(r => ({
+      room_number: r.fee.room_number,
+      overdue_level: r.fee.overdue_level,
+      unpaid_amount: r.fee.unpaid_amount,
+      building: r.fee.building,
+    })),
+    intercept_samples: interceptReasons.slice(0, 10),
+  };
 }

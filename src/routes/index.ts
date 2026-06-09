@@ -14,7 +14,7 @@ import {
   FeeQuerySchema, RecalcSchema, CreateTaskSchema, TemplateSelectSchema,
   QueueQuerySchema, ReceiptSchema, PaymentSyncSchema, ReductionSchema,
   NoteSchema, ComplaintSchema, ApprovalSchema, StatsQuerySchema, CallResultSchema,
-  PaginationSchema,
+  PaginationSchema, ComboStatsSchema, ClosureBoardSchema, PreviewTaskSchema,
 } from '../types/schemas';
 
 const router = Router();
@@ -66,6 +66,15 @@ router.post('/tasks', validateBody(CreateTaskSchema), wrap(async (req, res) => {
   try {
     const result = await TaskService.createCollectionTask(req.body, req.headers['x-operator'] as string);
     res.json({ code: 200, message: '任务创建成功', data: result });
+  } catch (e: any) {
+    res.status(400).json({ code: 400, message: e.message });
+  }
+}));
+
+router.post('/tasks/preview', validateBody(PreviewTaskSchema), wrap(async (req, res) => {
+  try {
+    const result = await TaskService.previewCollectionTask((req as any).validatedBody || req.body);
+    res.json({ code: 200, message: '预演成功', data: result });
   } catch (e: any) {
     res.status(400).json({ code: 400, message: e.message });
   }
@@ -270,6 +279,16 @@ router.get('/stats/overview', validateQuery(StatsQuerySchema), wrap(async (req, 
 
 router.get('/stats/building-ranking', wrap(async (_req, res) => {
   const result = await StatsService.getBuildingRanking();
+  res.json({ code: 200, message: 'success', data: result });
+}));
+
+router.get('/stats/combo', validateQuery(ComboStatsSchema), wrap(async (req, res) => {
+  const result = await StatsService.getComboStats((req as any).validatedQuery || req.query);
+  res.json({ code: 200, message: 'success', data: result });
+}));
+
+router.get('/stats/closure', validateQuery(ClosureBoardSchema), wrap(async (req, res) => {
+  const result = await StatsService.getClosureBoard((req as any).validatedQuery || req.query);
   res.json({ code: 200, message: 'success', data: result });
 }));
 
