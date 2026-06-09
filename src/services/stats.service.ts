@@ -380,7 +380,8 @@ async function getOverallBreakdown(building?: string) {
 
 async function getByStage(building?: string) {
   const band = building ? `AND r.building = '${building.replace(/'/g, "''")}'` : '';
-  // 实际回款：取 stage 对应任务催缴后的住户付款（去重）
+  const bandRooms = building ? `AND rpx.building = '${building.replace(/'/g, "''")}'` : '';
+  const bandQmap = building ? `AND rq.building = '${building.replace(/'/g, "''")}'` : '';
   const stageStats = await all(`
     SELECT ct.stage,
       COUNT(DISTINCT ct.id) as task_count,
@@ -396,19 +397,25 @@ async function getByStage(building?: string) {
     WHERE 1=1 ${band}
     GROUP BY ct.stage ORDER BY ct.stage
   `);
-  // 回款：单独去重查询
+  // 回款：单独去重查询，每处 JOIN 都加楼栋条件
   const payStats = await all<any>(`
-    SELECT COALESCE(ct.stage, f.stage) as stage,
+    SELECT COALESCE(qmap.t_stage, (SELECT MIN(f.stage) FROM fees f WHERE f.room_number = px.prn)) as stage,
       COUNT(DISTINCT px.pid) as payment_count,
       COALESCE(SUM(px.pamt), 0) as actual_paid
     FROM (
       SELECT DISTINCT py.id as pid, py.amount as pamt, py.room_number as prn
       FROM payments py
     ) px
-    LEFT JOIN rooms r ON r.room_number = px.prn ${band ? band.replace('AND', 'AND r.building = ') : ''}
-    LEFT JOIN (SELECT DISTINCT sq.room_number as qrn, MIN(ct.stage) as t_stage FROM send_queues sq LEFT JOIN collection_tasks ct ON ct.id = sq.task_id GROUP BY sq.room_number) qmap ON qmap.qrn = px.prn
-    LEFT JOIN collection_tasks ct ON ct.stage = qmap.t_stage
-    LEFT JOIN fees f ON f.room_number = px.prn
+    LEFT JOIN rooms rpx ON rpx.room_number = px.prn
+    LEFT JOIN (
+      SELECT sq.room_number as qrn, MIN(ct.stage) as t_stage
+      FROM send_queues sq
+      LEFT JOIN collection_tasks ct ON ct.id = sq.task_id
+      LEFT JOIN rooms rq ON sq.room_number = rq.room_number
+      WHERE 1=1 ${bandQmap}
+      GROUP BY sq.room_number
+    ) qmap ON qmap.qrn = px.prn
+    WHERE rpx.building IS NOT NULL ${bandRooms}
     GROUP BY 1
   `);
   const payMap = new Map(payStats.map((r: any) => [r.stage, r]));
@@ -533,18 +540,28 @@ export async function getBuildingRanking() {
 
 // ============ 催缴闭环看板 ===============
 export async function getClosureBoard(params: any = {}) {
-  const { building, stage, startDate, endDate, channel } = params;
-  const roomNumber: string | undefined = params.roomNumber;
-  const taskId: string | undefined = params.taskId;
+  // 统一 try/catch: 任何 SQL 异常都返回默认值, 绝不 throw 500
+  const safeGet = async (sql: string, ...vals: any[]) => { try { return (await get<any>(sql, ...vals)) || {}; } catch (e) { return {}; } };
+  const safeAll = async (sql: string, ...vals: any[]) => { try { return (await all<any>(sql, ...vals)) || []; } catch (e) { return []; } };
+  const defStep = () => ({ count: 0, room_count: 0, amount: 0, active: 0 });
 
-  const stsArr = (() => {
-    if (!stage) return null;
-    return Array.isArray(stage) ? stage : String(stage).split(',').filter(Boolean);
-  })();
-  const chArr = (() => {
-    if (!channel) return null;
-    return Array.isArray(channel) ? channel : String(channel).split(',').filter(Boolean);
-  })();
+  let building: any, stage: any, startDate: any, endDate: any, channel: any;
+  let roomNumber: string | undefined, taskId: string | undefined;
+  let stsArr: any, chArr: any;
+
+  try {
+    building = params.building; stage = params.stage;
+    startDate = params.startDate; endDate = params.endDate; channel = params.channel;
+    roomNumber = params.roomNumber; taskId = params.taskId;
+
+    stsArr = (() => {
+      if (!stage) return null;
+      return Array.isArray(stage) ? stage : String(stage).split(',').filter(Boolean);
+    })();
+    chArr = (() => {
+      if (!channel) return null;
+      return Array.isArray(channel) ? channel : String(channel).split(',').filter(Boolean);
+    })();
 
   // 核心：构造"过滤后覆盖到的住户集合+费用集合"
   // 当 task_id 存在时，所有 6 步都基于该任务覆盖到的费用
@@ -583,8 +600,8 @@ export async function getClosureBoard(params: any = {}) {
   const qWhere = qAnds.length ? `WHERE ${qAnds.join(' AND ')}` : '';
 
   // step1: 欠费
-  const s1 = await get<any>(`
-    SELECT
+  const s1 = await safeGet(
+    `SELECT
       COUNT(DISTINCT f.id) as step1_fee_count,
       COUNT(DISTINCT f.room_id) as step1_room_count,
       COALESCE(SUM(CASE WHEN f.status != 'paid' THEN f.unpaid_amount END), 0) as step1_unpaid
@@ -592,8 +609,8 @@ export async function getClosureBoard(params: any = {}) {
   `, ...scopeValues);
 
   // step2: 已催 (send_queues) & step3: 送达
-  const s2s3 = await get<any>(`
-    SELECT
+  const s2s3 = await safeGet(
+    `SELECT
       COUNT(DISTINCT sq.id) as step2_sent_count,
       COUNT(DISTINCT sq.room_number) as step2_room_count,
       COUNT(DISTINCT CASE WHEN sq.status IN ('sent','delivered','pending') THEN sq.id END) as step2_active,
@@ -608,8 +625,8 @@ export async function getClosureBoard(params: any = {}) {
   `, ...qValues);
 
   // step4: 承诺 (receipts/call_records 中 result=promised)
-  const s4 = await get<any>(`
-    SELECT
+  const s4 = await safeGet(
+    `SELECT
       COUNT(DISTINCT sq.id) as step4_promised_count,
       COUNT(DISTINCT sq.room_number) as step4_room_count,
       COALESCE(SUM(f3.unpaid_amount), 0) as step4_promised_amount
@@ -640,8 +657,8 @@ export async function getClosureBoard(params: any = {}) {
   amtValues.push(...scopeValues);
   const amtWhere = amtConds.length ? `WHERE ${amtConds.join(' AND ')}` : '';
 
-  const s5amt = await get<any>(`
-    SELECT
+  const s5amt = await safeGet(
+    `SELECT
       COUNT(DISTINCT px.pid) as pay_count,
       COUNT(DISTINCT px.prn) as pay_rooms,
       COALESCE(SUM(px.pamt), 0) as total_amount
@@ -652,8 +669,8 @@ export async function getClosureBoard(params: any = {}) {
   `, ...amtValues);
 
   // ---- step5_count/step6: fees+scope 维度 ----
-  const s56 = await get<any>(`
-    SELECT
+  const s56 = await safeGet(
+    `SELECT
       COUNT(DISTINCT f.id) as step5_paid_count,
       COUNT(DISTINCT CASE WHEN f.status = 'paid' THEN f.room_id END) as step5_room_count,
       COUNT(DISTINCT CASE WHEN f.reduction_amount > 0 AND f.status = 'paid' THEN f.id END) as step6_reduced_count,
@@ -711,8 +728,8 @@ export async function getClosureBoard(params: any = {}) {
     if (roomNumber) { trackConds.push(`sq.room_number = ?`); trackVal.push(roomNumber); }
     if (taskId)     { trackConds.push(`sq.task_id = ?`);     trackVal.push(taskId);     }
     const trackWhere = trackConds.length ? `WHERE ${trackConds.join(' AND ')}` : '';
-    tracking = await all(`
-      SELECT
+    tracking = await safeAll(
+      `SELECT
         sq.room_number, r3.building, r3.owner_name, r3.owner_phone,
         sq.task_id, ct.name as task_name, ct.stage, ct.stage as stage_desc,
         sq.id as queue_id, sq.channel, sq.status, sq.priority,
@@ -770,17 +787,37 @@ export async function getClosureBoard(params: any = {}) {
     funnel_rates: funnelRates,
     tracking,
   };
+  } catch (e) {
+    // 兜底: 任何异常都返回稳定的空结构, 永不 500
+    const d = defStep();
+    return {
+      filters: {
+        building: building || null, stage: stsArr?.length ? stsArr : null,
+        channel: chArr?.length ? chArr : null,
+        roomNumber: roomNumber || null, taskId: taskId || null,
+        startDate: startDate || null, endDate: endDate || null,
+      },
+      steps: {
+        step1_unpaid: d, step2_collected: d, step3_delivered: d,
+        step4_promised: d, step5_paid: d, step6_reduced: d,
+      },
+      funnel_rates: {
+        rate_1_to_2: 0, rate_2_to_3: 0, rate_3_to_4: 0, rate_4_to_5: 0,
+        rate_1_to_5: 0, room_recovery_rate: 0, recovery_rate: 0,
+      },
+      tracking: [],
+      _error: (e as any)?.message,
+    };
+  }
 }
 
 // ============ 收费风险分析 ===============
 export async function getRiskAnalysis(params: any = {}) {
   const { building, startDate, endDate } = params;
   const band = building ? `AND r.building = '${building.replace(/'/g, "''")}'` : '';
-  const band2 = building ? `AND r2.building = '${building.replace(/'/g, "''")}'` : '';
-  const band3 = building ? `AND r3.building = '${building.replace(/'/g, "''")}'` : '';
-  const band4 = building ? `AND r4.building = '${building.replace(/'/g, "''")}'` : '';
 
   // 维度1: 按楼栋汇总
+  // ---- 关键: 子查询里的房间必须和主查询当前行的 r.building 关联, 防止数据串栋 ----
   const byBuilding = await all(`
     SELECT
       r.building,
@@ -789,13 +826,23 @@ export async function getRiskAnalysis(params: any = {}) {
       COUNT(DISTINCT CASE WHEN f.overdue_level IN ('severe','critical') AND f.status != 'paid' THEN r.id END) as high_risk_rooms,
       COALESCE(SUM(CASE WHEN f.overdue_level IN ('severe','critical') AND f.status != 'paid' THEN f.unpaid_amount END), 0) as high_risk_amount,
       COALESCE(SUM(CASE WHEN f.status != 'paid' THEN f.unpaid_amount END), 0) as total_unpaid,
-      (SELECT COUNT(DISTINCT sq.room_number) FROM send_queues sq LEFT JOIN rooms r2 ON sq.room_number = r2.room_number
-        LEFT JOIN receipts rec ON rec.queue_id = sq.id LEFT JOIN call_records cr ON cr.queue_id = sq.id
-        WHERE (rec.result = 'promised' OR cr.result = 'promised') ${band2}) as promised_rooms,
-      (SELECT COUNT(DISTINCT cmp.room_number) FROM complaints cmp LEFT JOIN rooms r3 ON r3.room_number = cmp.room_number
-        WHERE cmp.status = 'open' ${band3}) as complaint_rooms,
-      (SELECT COUNT(DISTINCT bl.room_number) FROM blacklists bl LEFT JOIN rooms r4 ON r4.room_number = bl.room_number
-        WHERE (bl.effective_to IS NULL OR bl.effective_to > datetime('now')) ${band4}) as blacklist_rooms
+      (SELECT COUNT(DISTINCT sq.room_number) FROM send_queues sq
+        LEFT JOIN rooms r2 ON sq.room_number = r2.room_number
+        LEFT JOIN receipts rec ON rec.queue_id = sq.id
+        LEFT JOIN call_records cr ON cr.queue_id = sq.id
+        WHERE r2.building = r.building ${band ? `AND r2.building = '${building.replace(/'/g, "''")}'` : ''}
+          AND (rec.result = 'promised' OR cr.result = 'promised')
+      ) as promised_rooms,
+      (SELECT COUNT(DISTINCT cmp.room_number) FROM complaints cmp
+        LEFT JOIN rooms r3 ON r3.room_number = cmp.room_number
+        WHERE r3.building = r.building ${band ? `AND r3.building = '${building.replace(/'/g, "''")}'` : ''}
+          AND cmp.status = 'open'
+      ) as complaint_rooms,
+      (SELECT COUNT(DISTINCT bl.room_number) FROM blacklists bl
+        LEFT JOIN rooms r4 ON r4.room_number = bl.room_number
+        WHERE r4.building = r.building ${band ? `AND r4.building = '${building.replace(/'/g, "''")}'` : ''}
+          AND (bl.effective_to IS NULL OR bl.effective_to > datetime('now'))
+      ) as blacklist_rooms
     FROM rooms r
     LEFT JOIN fees f ON f.room_id = r.id
     WHERE 1=1 ${band}

@@ -160,9 +160,9 @@ router.post('/payments/sync', validateBody(PaymentSyncSchema), wrap(async (req, 
 }));
 
 router.get('/payments/history', wrap(async (req, res) => {
-  const { roomNumber, startDate, endDate, page = 1, pageSize = 50 } = req.query as any;
+  const { roomNumber, building, startDate, endDate, page = 1, pageSize = 50 } = req.query as any;
   const result = await PaymentService.getPaymentHistory(
-    roomNumber as string, startDate as string, endDate as string, +page, +pageSize
+    roomNumber as string, startDate as string, endDate as string, +page, +pageSize, building as string
   );
   res.json({ code: 200, message: 'success', data: result });
 }));

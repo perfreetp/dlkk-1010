@@ -68,9 +68,10 @@ export async function syncPayment(data: any) {
   };
 }
 
-export async function getPaymentHistory(roomNumber?: string, startDate?: string, endDate?: string, page = 1, pageSize = 50) {
+export async function getPaymentHistory(roomNumber?: string, startDate?: string, endDate?: string, page = 1, pageSize = 50, building?: string) {
   const conditions: string[] = [];
   const values: any[] = [];
+  if (building) { conditions.push(`room_number IN (SELECT room_number FROM rooms WHERE building = ?)`); values.push(building); }
   if (roomNumber) { conditions.push('room_number LIKE ?'); values.push(`%${roomNumber}%`); }
   if (startDate) { conditions.push('paid_at >= ?'); values.push(startDate); }
   if (endDate) { conditions.push('paid_at <= ?'); values.push(endDate); }
