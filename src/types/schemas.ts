@@ -48,6 +48,11 @@ export const CreateTaskSchema = z.object({
   batchCreate: booleanLike().default(false),
   overdueLevels: z.array(z.string()).optional(),
   minAmount: z.coerce.number().optional(),
+  maxAmount: z.coerce.number().optional(),
+  minOverdueDays: z.coerce.number().int().optional(),
+  maxOverdueDays: z.coerce.number().int().optional(),
+  building: z.string().optional(),
+  roomNumber: z.string().optional(),
 });
 
 export const PreviewTaskSchema = z.object({
@@ -60,6 +65,7 @@ export const PreviewTaskSchema = z.object({
   batchCreate: booleanLike().default(true),
   overdueLevels: z.array(z.string()).optional(),
   minAmount: z.coerce.number().optional(),
+  maxAmount: z.coerce.number().optional(),
   minOverdueDays: z.coerce.number().int().optional(),
   maxOverdueDays: z.coerce.number().int().optional(),
   building: z.string().optional(),
@@ -153,10 +159,17 @@ export const ComboStatsSchema = z.object({
 export const ClosureBoardSchema = z.object({
   building: z.string().optional(),
   stage: z.union([z.string(), z.array(z.string())]).optional(),
+  channel: z.union([z.string(), z.array(z.string())]).optional(),
   startDate: z.string().optional(),
   endDate: z.string().optional(),
   roomNumber: z.string().optional(),
   taskId: z.string().optional(),
+});
+
+export const RiskAnalysisSchema = z.object({
+  building: z.string().optional(),
+  startDate: z.string().optional(),
+  endDate: z.string().optional(),
 });
 
 export const CallResultSchema = z.object({

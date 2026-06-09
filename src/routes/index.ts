@@ -15,6 +15,7 @@ import {
   QueueQuerySchema, ReceiptSchema, PaymentSyncSchema, ReductionSchema,
   NoteSchema, ComplaintSchema, ApprovalSchema, StatsQuerySchema, CallResultSchema,
   PaginationSchema, ComboStatsSchema, ClosureBoardSchema, PreviewTaskSchema,
+  RiskAnalysisSchema,
 } from '../types/schemas';
 
 const router = Router();
@@ -289,6 +290,11 @@ router.get('/stats/combo', validateQuery(ComboStatsSchema), wrap(async (req, res
 
 router.get('/stats/closure', validateQuery(ClosureBoardSchema), wrap(async (req, res) => {
   const result = await StatsService.getClosureBoard((req as any).validatedQuery || req.query);
+  res.json({ code: 200, message: 'success', data: result });
+}));
+
+router.get('/stats/risk-analysis', validateQuery(RiskAnalysisSchema), wrap(async (req, res) => {
+  const result = await StatsService.getRiskAnalysis((req as any).validatedQuery || req.query);
   res.json({ code: 200, message: 'success', data: result });
 }));
 

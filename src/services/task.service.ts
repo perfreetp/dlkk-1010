@@ -12,6 +12,36 @@ function parseBlockChannels(raw: string): string[] {
   return String(raw).split(',').map(s => s.trim().replace(/^[\["\s]+|[\]"\s]+$/g, '')).filter(Boolean);
 }
 
+function buildBatchFeeConditions(params: any): { sql: string; values: any[] } {
+  const { overdueLevels, minAmount, maxAmount, minOverdueDays, maxOverdueDays, building, roomNumber } = params;
+  const conds: string[] = [`f.status != 'paid'`];
+  const values: any[] = [];
+  const joins: string[] = [];
+
+  if (overdueLevels && overdueLevels.length > 0) {
+    const sts = Array.isArray(overdueLevels) ? overdueLevels : String(overdueLevels).split(',').filter(Boolean);
+    if (sts.length > 0) {
+      conds.push(`f.overdue_level IN (${sts.map(() => '?').join(',')})`);
+      values.push(...sts);
+    }
+  }
+  if (minAmount !== undefined && minAmount !== null) { conds.push(`f.unpaid_amount >= ?`); values.push(minAmount); }
+  if (maxAmount !== undefined && maxAmount !== null) { conds.push(`f.unpaid_amount <= ?`); values.push(maxAmount); }
+  if (minOverdueDays !== undefined && minOverdueDays !== null) { conds.push(`f.overdue_days >= ?`); values.push(minOverdueDays); }
+  if (maxOverdueDays !== undefined && maxOverdueDays !== null) { conds.push(`f.overdue_days <= ?`); values.push(maxOverdueDays); }
+
+  if (building || roomNumber) {
+    joins.push(`JOIN rooms r ON f.room_id = r.id`);
+    if (building) { conds.push(`r.building = ?`); values.push(building); }
+    if (roomNumber) { conds.push(`r.room_number LIKE ?`); values.push(`%${roomNumber}%`); }
+  }
+
+  return {
+    sql: `${joins.join(' ')} WHERE ${conds.join(' AND ')}`,
+    values,
+  };
+}
+
 export async function getTemplates(params: any) {
   const { type, stage, channel } = params;
   const conditions: string[] = ['enabled = 1'];
@@ -30,24 +60,16 @@ export async function getTemplates(params: any) {
 
 export async function createCollectionTask(params: any, operator?: string) {
   const { name, stage, templateId, channel, priority, scheduledAt,
-          feeIds, batchCreate, overdueLevels, minAmount } = params;
+          feeIds, batchCreate } = params;
 
   const template = await get<any>('SELECT * FROM templates WHERE id = ? AND enabled = 1', templateId);
   if (!template) throw new Error('模板不存在或已禁用');
 
-  let finalFeeIds = [...feeIds];
+  let finalFeeIds = [...(feeIds || [])];
 
   if (batchCreate) {
-    const conditions: string[] = [];
-    const values: any[] = [];
-    if (overdueLevels && overdueLevels.length > 0) {
-      conditions.push(`overdue_level IN (${overdueLevels.map(() => '?').join(',')})`);
-      values.push(...overdueLevels);
-    }
-    if (minAmount !== undefined) { conditions.push('unpaid_amount >= ?'); values.push(minAmount); }
-    conditions.push("status != 'paid'");
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const batchFees = await all<any>(`SELECT id FROM fees ${whereClause}`, ...values);
+    const { sql: filterSql, values: filterVals } = buildBatchFeeConditions(params);
+    const batchFees = await all<any>(`SELECT f.id FROM fees f ${filterSql}`, ...filterVals);
     finalFeeIds = [...new Set([...finalFeeIds, ...batchFees.map(f => f.id)])];
   }
 
@@ -188,23 +210,12 @@ export async function getTaskDetail(taskId: string) {
 
 // 批量催缴任务预演 (preflight)
 export async function previewCollectionTask(params: any) {
-  const { stage, channel, priority, feeIds, batchCreate, overdueLevels, minAmount } = params;
+  const { stage, channel, priority, feeIds, batchCreate } = params;
 
   let finalFeeIds = [...(feeIds || [])];
   if (batchCreate) {
-    const conditions: string[] = [];
-    const values: any[] = [];
-    if (overdueLevels && overdueLevels.length > 0) {
-      const sts = Array.isArray(overdueLevels) ? overdueLevels : String(overdueLevels).split(',').filter(Boolean);
-      if (sts.length > 0) {
-        conditions.push(`f.overdue_level IN (${sts.map(() => '?').join(',')})`);
-        values.push(...sts);
-      }
-    }
-    if (minAmount !== undefined && minAmount !== null) { conditions.push('f.unpaid_amount >= ?'); values.push(minAmount); }
-    conditions.push("f.status != 'paid'");
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const batchFees = await all<any>(`SELECT f.id FROM fees f ${whereClause}`, ...values);
+    const { sql: filterSql, values: filterVals } = buildBatchFeeConditions(params);
+    const batchFees = await all<any>(`SELECT f.id FROM fees f ${filterSql}`, ...filterVals);
     finalFeeIds = [...new Set([...finalFeeIds, ...batchFees.map(f => f.id)])];
   }
 
